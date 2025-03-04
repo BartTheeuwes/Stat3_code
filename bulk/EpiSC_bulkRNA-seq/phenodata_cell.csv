@@ -1,0 +1,11 @@
+sample,name,condition,genotype,type
+Stat3null_ESC_2iLIF_1,Stat3null_ESC_2iLIF,2iLIF,Stat3null,ESC
+Stat3null_ESC_2iLIF_2,Stat3null_ESC_2iLIF,2iLIF,Stat3null,ESC
+Stat3null_EpiSC_2,Stat3null_EpiSC,AFX,Stat3null,EpiSC
+Stat3null_EpiSC_6,Stat3null_EpiSC,AFX,Stat3null,EpiSC
+WT_ESC_2iLIF_1,WT_ESC_2iLIF,2iLIF,WT,ESC
+WT_ESC_2iLIF_2,WT_ESC_2iLIF,2iLIF,WT,ESC
+WT_ESC_2i_1,WT_ESC_2i,2i,WT,ESC
+WT_ESC_2i_2,WT_ESC_2i,2i,WT,ESC
+WT_EpiSC_13,WT_EpiSC,AFX,WT,EpiSC
+WT_EpiSC_8,WT_EpiSC,AFX,WT,EpiSC

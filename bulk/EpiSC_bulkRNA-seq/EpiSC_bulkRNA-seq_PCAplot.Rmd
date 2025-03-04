@@ -1,0 +1,120 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+suppressPackageStartupMessages({
+    library(DESeq2)
+    library(ggplot2)
+    library(rtracklayer)
+    library(pheatmap)
+    library(RColorBrewer)
+    library(ggrepel)
+    library(reshape2)
+    library(dplyr)
+    library(data.table)
+    library(tidyr)
+    library(ggpubr)
+    library(purrr)
+    library(patchwork)
+    library(pheatmap)
+    library(ComplexHeatmap)
+    library(org.Mm.eg.db)
+    library(edgeR)
+})
+```
+
+```{r}
+####################
+## Define options ##
+####################
+LFC_thr = 2
+padj_thr = 0.05
+
+# plot options
+options(repr.plot.width=15, repr.plot.height=8) 
+```
+
+##import data
+```{r}
+countData <- as.matrix(read.csv('gene_count_matrix_cell.csv', row.names = 'gene_id'))
+colData <- read.csv('phenodata_cell.csv', row.names = 1)
+```
+
+##Check all sample IDs in colData are also in CountData and match their orders 
+```{r}
+all(rownames(colData) %in% colnames(countData))
+countData <- countData[, rownames(colData)]
+all(rownames(colData) == colnames(countData))
+```
+
+##Create a DESeqDataSet from count matrix and labels
+```{r}
+ddsFull <-DESeqDataSetFromMatrix(countData = countData, colData = colData, design = ~ genotype + type + genotype:type)
+ddsFull <- ddsFull[rowSums(counts(ddsFull)) > 0, ]
+```
+
+##Run the default analysis for DESeq2 and generate results table 
+```{r}
+dds <- DESeq(ddsFull)
+#Exclude genes with a read count of zero
+dds <- dds[rowSums(counts(dds))>0, ]
+res <- results(dds, contrast = c('genotype', "Stat3null", "WT"))
+#Sort by adjusted p-value and display 
+res <- res[order(res$padj), ]
+```
+
+#Separate gene_id and gene_name
+```{r}
+gene_name <- rownames(res)
+gene_name_split <- strsplit(gene_name, "\\|")
+head(gene_name_split)
+rownames(res) <- sapply(gene_name_split, "[", 2)
+res$gene_id <- sapply(gene_name_split, "[", 1)
+head(res)
+library(stringr)
+res$gene_id <- str_replace(res$gene_id,
+                        pattern = ".[0-9]+$",
+                        replacement = "")
+head(res)
+```
+
+##Normalizartion
+```{r}
+# Normalisation
+ddsFull <- estimateSizeFactors(ddsFull)
+rld <- rlog(ddsFull, blind = TRUE)
+rld$genotype <- factor(rld$genotype, levels = c("WT", "Stat3null"))
+counts_rld = assay(rld)
+
+#relevels to WT
+dds$genotype <- factor(dds$genotype, levels = c("WT", "Stat3null"))
+```
+
+
+##Separate gene_id and gene_name (rld)
+```{r}
+gene_name <- rownames(rld)
+gene_name_split <- strsplit(gene_name, "\\|")
+head(gene_name_split)
+rownames(rld) <- sapply(gene_name_split, "[", 2)
+head(rld)
+```
+
+#PCA
+```{r}
+data <- plotPCA(rld, intgroup=c("genotype", "name", "condition"), returnData=TRUE)
+percentVar <- round(100 * attr(data, "percentVar"))
+PCA <- ggplot(data, aes(PC1, PC2, color=condition, shape=genotype))+
+         geom_point(size=5)+
+         xlab(paste0("PC1: ",percentVar[1],"% variance"))+
+         ylab(paste0("PC2: ",percentVar[2],"% variance"))+
+         theme_bw()+
+         ylim(-40, 50)+
+         theme(text = element_text(size = 20))+
+         coord_fixed()
+
+print(PCA)
+```
+

@@ -1,0 +1,471 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+suppressPackageStartupMessages({
+    library(DESeq2)
+    library(ggplot2)
+    library(rtracklayer)
+    library(pheatmap)
+    library(RColorBrewer)
+    library(ggrepel)
+    library(reshape2)
+    library(dplyr)
+    library(data.table)
+    library(tidyr)
+    library(ggpubr)
+    library(purrr)
+    library(patchwork)
+    library(pheatmap)
+    library(ComplexHeatmap)
+    library(org.Mm.eg.db)
+    library(edgeR)
+})
+```
+
+```{r}
+####################
+## Define options ##
+####################
+LFC_thr = 2
+padj_thr = 0.05
+
+# plot options
+options(repr.plot.width=15, repr.plot.height=8) 
+```
+
+
+```{r}
+countData <- as.matrix(read.csv('gene_count_matrix_epiblast.csv', row.names = 'gene_id'))
+rownames(countData) = rownames(countData) %>% strsplit('[|]') %>% map(2) # change rownames
+
+colData <- read.csv('phenodata_epiblast.csv', row.names = 1)
+colData$genotype = gsub("-/-", "null", colData$genotype)
+colData$group = paste0(colData$genotype, '_',colData$stage)
+```
+
+#Using all samples
+```{r}
+colData$genotype <- factor(colData$genotype, levels = c("WT", "Stat3null"))
+countData <- countData[, rownames(colData)]
+rownames(countData) = make.names(rownames(countData), unique=TRUE)
+head(countData)
+```
+
+
+
+```{r}
+##Check all sample IDs in colData are also in CountData and match their orders
+all(rownames(colData) %in% colnames(countData))
+countData <- countData[, rownames(colData)]
+all(rownames(colData) == colnames(countData))
+```
+
+```{r}
+##Create a DESeqDataSet from count matrix and labels
+
+ddsFull <-DESeqDataSetFromMatrix(countData = countData, colData = colData, design = ~ stage + genotype + genotype:stage)  # group
+ddsFull <- ddsFull[rowSums(counts(ddsFull)) > 10, ]
+ddsFull$genotype <- factor(ddsFull$genotype, levels = c("WT","Stat3null"))
+ddsFull$stage <- factor(ddsFull$stage, levels = c("E5.5","E6.5", "E7.5")) 
+```
+
+#Inspect normalization methods
+```{r}
+# Normalisation
+ddsFull <- estimateSizeFactors(ddsFull)
+normalized_counts <- counts(ddsFull, normalized=TRUE)
+normalized_counts = log1p(normalized_counts)
+
+#normalization
+rld <- rlog(ddsFull, blind = TRUE)
+rld$genotype <- factor(rld$genotype, levels = c("WT", "Stat3null"))
+counts_rld = assay(rld)
+
+vst = vst(ddsFull, blind = TRUE)
+counts_vst = assay(vst)
+
+# log normalisation: each count is divided by the total counts in the sample, multiplied by 10000, and then log transformed using log1p (natural log + 1)
+logcounts = lapply(1:nrow(colData), function(x){
+    tmp = countData[,x]
+    tmp = log1p(tmp/sum(tmp) * 10000)
+    }) %>% do.call('cbind', .) #%>% as.data.table(.) %>% setnames(meta$sample)
+rownames(logcounts) = rownames(countData)
+colnames(logcounts) = colnames(countData)
+```
+
+```{r}
+head(counts_rld[rownames(countData) %in% rownames(counts_rld)])
+```
+
+```{r}
+summary(rownames(countData)==rownames(normalized_counts))
+summary(rownames(countData)==rownames(counts_rld))
+summary(rownames(countData)==rownames(counts_vst))
+summary(rownames(countData)==rownames(logcounts))
+```
+
+```{r}
+head(normalized_counts)
+```
+
+```{r}
+options(repr.plot.width=15, repr.plot.height=4) 
+test = cbind(countData[rownames(normalized_counts),][,1], normalized_counts[,1])
+colnames(test) = c('counts', 'normalized')
+ggplot(as.data.frame(test), aes(counts, normalized)) + geom_point() + theme_bw() + ggtitle('normalized_counts')
+
+test = cbind(countData[rownames(counts_rld),][,1], counts_rld[,1])
+colnames(test) = c('counts', 'normalized')
+ggplot(as.data.frame(test), aes(counts, normalized)) + geom_point() + theme_bw() + ggtitle('counts_rld')
+
+test = cbind(countData[rownames(counts_vst),][,1], counts_vst[,1])
+colnames(test) = c('counts', 'normalized')
+ggplot(as.data.frame(test), aes(counts, normalized)) + geom_point() + theme_bw() + ggtitle('counts_vst')
+
+test = cbind(countData[,1], logcounts[,1])
+colnames(test) = c('counts', 'normalized')
+ggplot(as.data.frame(test), aes(counts, normalized)) + geom_point() + theme_bw() + ggtitle('logcounts')
+
+```
+
+```{r}
+# continue with own normalization: 
+normalized_counts = logcounts
+```
+
+
+#Inspect QC stats
+```{r}
+nrow(normalized_counts)
+```
+
+```{r}
+head(normalized_counts)
+```
+
+
+```{r}
+head(countData)
+```
+
+```{r}
+# sample statistics
+sample = data.table(sample=colnames(normalized_counts), 
+                   sum = colSums(normalized_counts), 
+                   mean = colMeans(normalized_counts), 
+                   median = colMedians(normalized_counts), 
+                   var = colVars(normalized_counts),
+                   ngenes = colSums(as.matrix((normalized_counts > 0) + 0)))
+
+meta_sample = merge(colData, sample, by.x=0, by.y='sample')
+
+plot_stat = function(x){
+    ggplot(meta_sample, aes_string('genotype', x, fill='genotype')) + 
+        geom_boxplot(outlier.shape = NA) + 
+        geom_point() + 
+        viridis::scale_color_viridis() + 
+        facet_wrap(~stage) + 
+        ggtitle(x) +
+        theme_bw() + 
+        theme(text=element_text(size=20), 
+                   axis.text.x=element_text(angle=-45, hjust=0, vjust=1))
+    }
+options(repr.plot.width=20, repr.plot.height=8)
+plot_stat('sum') + plot_stat('var') + plot_stat('median') + plot_stat('ngenes')
+options(repr.plot.width=10, repr.plot.height=8)
+```
+
+```{r}
+# sample statistics
+sample = data.table(sample=colnames(countData), 
+                   sum = colSums(countData), 
+                   mean = colMeans(countData), 
+                   median = colMedians(countData), 
+                   var = colVars(countData),
+                   ngenes = colSums(as.matrix((countData > 0) + 0)))
+
+meta_sample = merge(colData, sample, by.x=0, by.y='sample')
+
+plot_stat = function(x){
+    ggplot(meta_sample, aes_string('genotype', x, fill='genotype')) + 
+        geom_boxplot(outlier.shape = NA) + 
+        geom_point() + 
+        viridis::scale_color_viridis() + 
+        facet_wrap(~stage) + 
+        ggtitle(x) +
+        theme_bw() + 
+        theme(text=element_text(size=20), 
+                   axis.text.x=element_text(angle=-45, hjust=0, vjust=1))
+    }
+options(repr.plot.width=20, repr.plot.height=8)
+plot_stat('sum') + plot_stat('var') + plot_stat('median') + plot_stat('ngenes')
+options(repr.plot.width=10, repr.plot.height=8)
+```
+
+```{r}
+options(repr.plot.width=15, repr.plot.height=5) 
+ggplot(sample, aes(sample, sum)) + geom_point() + theme_bw() + theme(axis.text.x=element_text(angle=-45, hjust=0, vjust=1), text=element_text(size=20))
+ggplot(sample, aes(sample, median)) + geom_point() + theme_bw() + theme(axis.text.x=element_text(angle=-45, hjust=0, vjust=1), text=element_text(size=20))
+ggplot(sample, aes(sample, var)) + geom_point() + theme_bw() + theme(axis.text.x=element_text(angle=-45, hjust=0, vjust=1), text=element_text(size=20))
+ggplot(sample, aes(sample, ngenes)) + geom_point() + theme_bw() + theme(axis.text.x=element_text(angle=-45, hjust=0, vjust=1), text=element_text(size=20))
+```
+
+```{r}
+options(repr.plot.width=15, repr.plot.height=5) 
+mt_stats = data.table(sample=colnames(normalized_counts),
+                      mt_expr = colSums(countData[grep('^mt', rownames(countData)),]),
+                        total_expr = colSums(countData)) %>%
+                    .[,mt_perc:=round(mt_expr/total_expr*100,2)]
+
+ggplot(mt_stats, aes(sample, mt_perc)) + geom_bar(stat='identity', fill='black') + theme_bw() + theme(text=element_text(size=20), axis.text.x=element_text(angle=-45, hjust=0, vjust=1))
+```
+
+
+```{r}
+# Gene statistics
+genes = data.table(gene=rownames(normalized_counts), 
+                   sum = rowSums(normalized_counts), 
+                   mean = rowMeans(normalized_counts), 
+                   var = rowVars(normalized_counts))
+
+ggplot(genes, aes(mean, var, col=sum)) + 
+    geom_point() + 
+    geom_smooth(col='red') + 
+    viridis::scale_color_viridis() + 
+    theme_bw() + theme(text=element_text(size=20))
+```
+
+```{r}
+head(genes)
+```
+
+
+```{r}
+genes.long = genes %>% melt(id.vars = 'gene', variable.name = "stat", value.name = 'value')
+```
+
+
+```{r}
+   ggplot(genes.long, aes(stat,value)) + 
+geom_violin() +         
+geom_boxplot(outlier.shape = NA) + 
+  #      geom_point() + 
+        facet_wrap(~stat, scales='free') +
+        theme_bw() + 
+        theme(text=element_text(size=20), 
+                   axis.text.x=element_text(angle=-45, hjust=0, vjust=1))
+```
+
+
+```{r}
+head(genes)
+```
+```{r}
+ggplot(genes, aes(var)) + 
+    geom_histogram(col='black', fill='white') + 
+    theme_bw() + 
+    theme(text=element_text(size=20), 
+        axis.text.x=element_text(angle=-45, hjust=0, vjust=1))
+```
+
+
+```{r}
+#Heatmap of the sample-to-sample distances
+#removing genes that are not variable across any of the samples
+var_genes = genes[var>0.1, gene]
+
+```
+
+
+```{r}
+top_var = genes[order(-var), ]$gene
+```
+
+
+```{r}
+head(normalized_counts[head(top_var),])
+```
+
+
+```{r}
+head(countData[head(top_var),])
+```
+
+```{r}
+head(counts_vst[head(top_var),])
+```
+
+
+#Plotting correlation and distance (Figure 1F)
+```{r}
+counts_cor = cor(normalized_counts[var_genes,])
+
+colors <- colorRampPalette(c("blue","white","red"))(99)
+annocolors <- list(
+  genotype = c("WT"="#00afbb", "Stat3null"="#fc4e07"),
+  stage = c("E5.5"="#66cc33", "E6.5"="#cc9933", "E7.5"="#3399cc")
+)
+colData$genotype <- factor(colData$genotype, levels = c("WT", "Stat3null"))
+
+options(repr.plot.width=15, repr.plot.height=8) 
+pheatmap(counts_cor,
+         annotation_col = colData[,c('genotype', 'stage')],
+         annotation_colors = annocolors,
+         col=colors)
+```
+
+```{r}
+counts_dist <- dist(t(normalized_counts[var_genes,]), method = "euclidean")
+counts_dist = as.matrix(counts_dist)
+```
+
+```{r}
+colors <- colorRampPalette(c("blue","white","red"))(99)
+annocolors <- list(
+  genotype = c("WT"="#00afbb", "Stat3null"="#fc4e07"),
+  stage = c("E5.5"="#66cc33", "E6.5"="#cc9933", "E7.5"="#3399cc")
+)
+colData$genotype <- factor(colData$genotype, levels = c("WT", "Stat3null"))
+
+options(repr.plot.width=15, repr.plot.height=8) 
+pheatmap(counts_dist,
+         annotation_col = colData[,c('genotype', 'stage')],
+         annotation_colors = annocolors,
+         col=colors)
+```
+
+#Plotting PCAs (Figure 1E)
+```{r}
+# Select variable genes
+var_genes = genes[order(-var), gene] %>% head(5000)
+
+# PCA 
+pca = prcomp(t(as.matrix(normalized_counts[var_genes,])), scale=TRUE) # Does scale need to be TRUE?
+meta_pca = cbind(meta_sample, pca$x)
+
+
+options(repr.plot.width=15, repr.plot.height=8) 
+
+# Plot
+ggplot(meta_pca, aes(PC1, PC2, col=stage, shape=genotype)) + 
+    scale_shape_manual(values=c('Stat3null'=17, 'WT'=16))+
+    geom_point(size=6) +
+    #geom_text(label=rownames(meta_pca)) +
+    theme_bw() + 
+    labs(x = paste0('PC1: ', round(pca$sdev[1],1), '% variance'),
+         y =  paste0('PC2: ', round(pca$sdev[2],1), '% variance')) + 
+    theme(text=element_text(size=20, color='black'))
+```
+
+#DEG heatmap
+```{r}
+# DEseq per stage
+DEgenes = lapply(unique(colE567$stage), function(x){ # only on first one as test
+  meta = colE567[colE567$stage == x,]
+  counts.mtx = countDataE567[, rownames(meta)]
+# remove non-expressed genes to get higher p values
+  counts.mtx = counts.mtx[rowSums(counts.mtx) > 10, ]
+  dds = DESeqDataSetFromMatrix(countData = counts.mtx, colData = meta, design = ~ genotype)  # group
+  dds$genotype <- factor(dds$genotype, levels = c("WT","Stat3null"))
+
+  deseq = DESeq(dds)
+  res = results(deseq, contrast = c('genotype', "Stat3null", "WT")) %>% 
+                as.data.table(., keep.rownames=T) %>% 
+                setnames('rn', 'gene') %>%
+                .[, sig:=padj <= padj_thr & abs(log2FoldChange) >= LFC_thr & !is.na(padj)] %>%
+                .[, stage:=x]
+  return(res)
+}) 
+```
+
+```{r}
+to.plot = rbindlist(DEgenes)
+```
+
+```{r}
+head(to.plot)
+```
+
+```{r}
+opts = list()
+opts$nclust = 5
+opts$nclust_sample = 5
+```
+
+```{r}
+ddsFull
+```
+
+
+```{r}
+# get normalized counts of genes that are significant in any of the timepoints
+heatmap.mtx = normalized_counts[unique(to.plot[sig==TRUE, gene]), ]
+
+heatmap_scaled.mtx <- t(scale(t(heatmap.mtx)))
+
+# Gene split
+#perform k-means with 4 centers and take a look at the gene-to-cluster assignment.
+set.seed(1234)
+kclus <- kmeans(heatmap_scaled.mtx, opts$nclust)
+#use the split parameter of Heatmap() in order to split the heatmap based on the k-means result:
+split <- paste0("Cluster ", kclus$cluster)
+# fix order of the clusters to have 1 to 4, top to bottom
+split <- factor(split, levels = paste0('Cluster ', 1:opts$nclust))
+
+# Sample split
+#perform k-means with 4 centers and take a look at the gene-to-cluster assignment.
+set.seed(1234)
+kclus <- kmeans(t(heatmap_scaled.mtx), opts$nclust_sample)
+#use the split parameter of Heatmap() in order to split the heatmap based on the k-means result:
+sample_split <- paste0("Cluster ", kclus$cluster)
+# fix order of the clusters to have 1 to 4, top to bottom
+sample_split <- factor(sample_split, levels = paste0('Cluster ', 1:opts$nclust_sample))
+    
+list = c("T", "Axin2", "Cer1", "Dkk1","Wnt3a", "Tbx3","Wnt6", "Wnt8a","Wnt5a", "Igf2", "Bmp2","Bmp4", "Bmp5", "Fgf5", "Fgf3","Fgf8", "Cer1", "Prdm1", "Nkx1-2", "Cubn", "Apoe1", "Spry4", "Tead1","Apob", "Id1","Apoa1", "Apoa4" , "Sox7", "Eomes", "Hoxb2", "Hoxb3","Gbx2", "Nodal", "Notch1", "Nanog", "Esrrb", "Tfcp2l1", "Meox1", "Meox2", "Meis1", "Meis2")
+genelabs <- rowAnnotation(Genes = anno_mark(at=which(rownames(heatmap_scaled.mtx) %in% list), labels = rownames(heatmap_scaled.mtx)[which(rownames(heatmap_scaled.mtx) %in% list)]))
+
+
+#top annotation
+anno <- HeatmapAnnotation(df=colData(ddsFull)[, c("genotype", "stage")], 
+                          col = list(genotype=c("WT"="#00afbb", "Stat3null"="#fc4e07"), 
+                                     stage=c("E5.5"="#66cc33", "E6.5"="#cc9933", "E7.5"="#3399cc")),
+                          annotation_legend_param = list(title_gp = gpar(fontsize = 12),
+                                                         labels_gp = gpar(fontsize = 12)))
+
+
+hm <- Heatmap(heatmap_scaled.mtx, 
+              split = split, 
+              name = "z-score", 
+              top_annotation = anno,
+            #  cluster_row_slices = FALSE, 
+              cluster_rows = TRUE,
+              column_split = sample_split, 
+              cluster_columns = TRUE,
+              show_row_dend = FALSE, 
+              row_gap = unit(1, "mm"), 
+              column_gap = unit(1, "mm"), 
+              border = TRUE, 
+              row_title_gp = gpar(fontsize = 12),
+              row_names_gp = gpar(fontsize = 10), 
+              column_title_gp = gpar(fontsize = 12), 
+              column_names_gp = gpar(fontsize = 10),
+              heatmap_legend_param = list(title_gp=gpar(fontsize = 12),
+                                          labels_gp=gpar(fontsize = 12)
+                                          )
+              )
+
+```
+
+```{r}
+pdf("Heatmap.pdf", width = 7.5, height = 10)
+draw(hm + genelabs)
+dev.off()
+    
+options(repr.plot.width=15, repr.plot.height=10) 
+draw(hm + genelabs)
+```
+
+

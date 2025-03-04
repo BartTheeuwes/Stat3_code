@@ -1,0 +1,219 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+suppressPackageStartupMessages({
+    library(DESeq2)
+    library(ggplot2)
+    library(rtracklayer)
+    library(pheatmap)
+    library(RColorBrewer)
+    library(ggrepel)
+    library(reshape2)
+    library(dplyr)
+    library(data.table)
+    library(tidyr)
+    library(tibble)
+    library(ggpubr)
+    library(purrr)
+    library(patchwork)
+    library(pheatmap)
+    library(ComplexHeatmap)
+    library(org.Mm.eg.db)
+    library(edgeR)
+    library(EnhancedVolcano)
+    library(apeglm)
+    library(circlize) 
+})
+```
+
+### Define options
+```{r}
+LFC = 1
+FDR <- 0.05
+
+# plot options
+options(repr.plot.width=15, repr.plot.height=8) 
+```
+
+```{r}
+# Data Import
+countData <- as.matrix(read.csv('gene_count_matrix_cell.csv', row.names = 'gene_id'))
+colData <- read.csv('phenodata_cell.csv', row.names = 1)
+```
+
+# EpiSC data
+```{r}
+colEpi <- colData[colData$condition=="AFX",]
+countData <- countData[, rownames(colEpi)]
+head(countData)
+```
+
+##Check all sample IDs in colData are also in CountData and match their orders
+```{r}
+all(rownames(colEpi) %in% colnames(countData))
+countData <- countData[, rownames(colEpi)]
+all(rownames(colEpi) == colnames(countData))
+```
+
+
+```{r}
+##Create a DESeqDataSet from count matrix and labels 
+dds <-DESeqDataSetFromMatrix(countData = countData, colData = colEpi, design = ~ genotype)  # group
+# Genes with at least 10 reads in at least one sample were selected.
+keep <- rowSums(counts(dds) >= 10) >= 1
+dds <- dds[keep, ]
+dds$genotype <- factor(dds$genotype, levels = c("WT","Stat3null"))
+```
+
+```{r}
+dds <- DESeq(dds)
+res <- results(dds, contrast = c("genotype", "Stat3null", "WT"))
+```
+
+#Separate gene_id and gene_name
+```{r}
+gene_names <- rownames(res)
+gene_name_split <- strsplit(gene_names, "\\|")
+gene_name_extracted <- sapply(gene_name_split, function(x) ifelse(length(x) > 1, x[2], x[1]))
+
+# Add the extracted gene names as a new column and reset the row names.
+rownames(res) <- gene_name_extracted
+```
+
+```{r}
+exclude_genes <- "Xist"
+res <- res[rownames(res) != exclude_genes, ]
+
+# Convert the DESeq2 results into a data frame.
+res_df <- as.data.frame(res)
+```
+
+```{r}
+# Specified gene list
+annotated_genes <- c("Stat3", "Fgf10", "T", "Egfr", "Dkk1", "Eras", "Fut1", "Cdh9", "Tgfb2", "Egfr", "Cer1", "Notch4")
+
+# Add categories for MA plot
+res_df$category <- ifelse(res_df$padj < FDR & res_df$log2FoldChange > LFC, "Upregulated",
+                          ifelse(res_df$padj < FDR & res_df$log2FoldChange < -LFC, "Downregulated", "Non significant"))
+# Extract annotation data for rows that match the annotated_genes list.
+annotated_data <- res_df[rownames(res_df) %in% annotated_genes, ]
+
+# Extract significant data excluding annotations
+significant_data <- subset(res_df, category %in% c("Upregulated", "Downregulated") & !(rownames(res_df) %in% annotated_genes))
+
+# Generate an MA plot.
+p <- ggplot(res_df, aes(x = baseMean, y = log2FoldChange, color = category)) +
+  geom_point(alpha = 0.4, size = 1.75) +
+  scale_x_log10() +
+  scale_color_manual(values = c("Upregulated" = "red", "Downregulated" = "blue", "Non significant" = "grey30"),
+                     name = "Significance",
+                     labels = c("Upregulated" = "Significant up",
+                                "Downregulated" = "Significant down",
+                                "Non significant" = "Non significant")) +
+  ylab("Log Fold Change") +
+  xlab("Average Expression (baseMean)") +
+  theme_bw() +
+  theme(axis.title.x = element_text(size = 16),
+        axis.title.y = element_text(size = 16),
+        axis.text.x = element_text(size = 12),
+        axis.text.y = element_text(size = 12),
+        legend.title = element_text(size = 12)) +
+  coord_cartesian(ylim = c(-15, 15)) +
+  # Annotation of significant genes (excluding those in the annotated_genes list).
+  geom_text_repel(data = significant_data,
+                  aes(label = rownames(significant_data)),
+                  size = 4,
+                  box.padding = 0.5,
+                  point.padding = 0.5,
+                  min.segment.length = 0.2,
+                  force = 1,
+                  show.legend = FALSE) +
+  # Add additional annotations for specific genes (only those in the annotated_genes list)
+  geom_text_repel(data = annotated_data,
+                  aes(label = rownames(annotated_data)),
+                  size = 4,
+                  box.padding = 0.5,
+                  point.padding = 0.5,
+                  min.segment.length = 0.2,
+                  force = 2,
+                  show.legend = FALSE)
+
+print(p)
+```
+
+#Set DEG criteria using log2FoldChange and padj.
+```{r}
+# Classify based on the criteria: absolute log2FoldChange > 1 and padj < 0.05.
+res$category <- ifelse(!is.na(res$padj) & !is.na(res$log2FoldChange) &
+                         res$padj < 0.05 & res$log2FoldChange > 1, "Upregulated",
+                       ifelse(!is.na(res$padj) & !is.na(res$log2FoldChange) &
+                                res$padj < 0.05 & res$log2FoldChange < -1, "Downregulated", "Non significant"))
+
+# Create lists of upregulated and downregulated genes.
+upregulated_genes <- rownames(res[res$category == "Upregulated", ])
+downregulated_genes <- rownames(res[res$category == "Downregulated", ])
+
+# Display the number of genes in each list.
+cat("Number of upregulated genes:", length(upregulated_genes), "\n")
+cat("Number of downregulated genes:", length(downregulated_genes), "\n")
+
+# Display the upregulated and downregulated gene lists (showing only the first few rows)
+cat("Upregulated genes:\n")
+print(head(upregulated_genes))
+cat("\nDownregulated genes:\n")
+print(head(downregulated_genes))
+
+```
+
+# Export DEGs lists as csv
+```{r}
+write.csv(upregulated_genes, "EpiSC_Stat3UPDEGs_log2FC1_DESeq2.csv", row.names = F, col.names = F)
+write.csv(downregulated_genes, "EpiSC_Stat3DOWNDEGs_log2FC1_DESeq2.csv", row.names = F, col.names = F)
+```
+
+```{r}
+#Separate gene_id and gene_name
+gene_names <- rownames(dds)
+gene_name_split <- strsplit(gene_names, "\\|")
+gene_name_extracted <- sapply(gene_name_split, function(x) ifelse(length(x) > 1, x[2], x[1]))
+
+# Add the extracted gene names as a new column and reset the row names
+rownames(dds) <- gene_name_extracted
+```
+
+
+
+```{r}
+# Filter differentially expressed genes (DEGs)
+deg_genes <- rownames(res_df[!is.na(res_df$padj) & res_df$padj < FDR & abs(res_df$log2FoldChange) > LFC, ])
+
+# Extract normalized count data (dds is a DESeqDataSet object)
+normalized_counts <- counts(dds, normalized=TRUE)
+deg_counts <- normalized_counts[deg_genes, ]
+```
+
+
+```{r}
+# Specified gene list
+list <- c("Meis1", "Stat3", "Acta2", "Csf1", "Egfr", "Fgf10", "Fgf7", "Nr2f2", 
+                 "Nrp1", "Lrrc15", "Fut1", "Ndst3", "Gapdhrt2", "Gapdhrt", "Pou2f3", 
+          "Cdh9", "T", "Tgfb2", "Cer1", "Notch4", "Egfr", "Dkk1", "Eras", "Fut1", "Cdh9")
+
+genelabs <- rowAnnotation(Genes = anno_mark(at=which(rownames(deg_counts) %in% list), labels = rownames(deg_counts)[which(rownames(deg_counts) %in% list)]))
+
+
+hm2 <- Heatmap(matrix = t(scale(t(deg_counts))),
+               name = "z-score",
+               cluster_rows = TRUE,
+               clustering_method_rows = "ward.D2",
+               cluster_columns = TRUE,
+               clustering_method_columns = "ward.D2",
+               show_row_names = TRUE,
+               show_column_names = TRUE)
+
+draw(hm2 + genelabs)
+```
+

@@ -1,0 +1,352 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+suppressPackageStartupMessages({
+    library(DESeq2)
+    library(ggplot2)
+    library(rtracklayer)
+    library(pheatmap)
+    library(RColorBrewer)
+    library(ggrepel)
+    library(reshape2)
+    library(dplyr)
+    library(data.table)
+    library(tidyr)
+    library(ggpubr)
+    library(purrr)
+    library(ComplexHeatmap)
+    library(patchwork)
+    library(edgeR)
+    library(org.Mm.eg.db)
+    })
+```
+
+### Define options
+```{r}
+LFC_thr = 2
+padj_thr = 0.05
+
+# plot options
+options(repr.plot.width=15, repr.plot.height=8) 
+```
+
+```{r}
+countData <- as.matrix(read.csv('gene_count_matrix_epiblast.csv', row.names = 'gene_id'))
+rownames(countData) = rownames(countData) %>% strsplit('[|]') %>% map(2) # change rownames
+
+colData <- read.csv('phenodata_epiblast.csv', row.names = 1)
+colData$genotype = gsub("-/-", "null", colData$genotype)
+colData$group = paste0(colData$genotype, '_',colData$stage)
+```
+
+#Using all samples
+```{r}
+colData$genotype <- factor(colData$genotype, levels = c("WT", "Stat3null"))
+countData <- countData[, rownames(colData)]
+rownames(countData) = make.names(rownames(countData), unique=TRUE)
+head(countData)
+```
+
+```{r}
+##Check all sample IDs in colData are also in CountData and match their orders
+all(rownames(colData) %in% colnames(countData))
+countData <- countData[, rownames(colData)]
+all(rownames(colData) == colnames(countData))
+```
+
+
+```{r}
+##Create a DESeqDataSet from count matrix and labels
+ddsFull <-DESeqDataSetFromMatrix(countData = countData, colData = colData, design = ~ stage + genotype + genotype:stage)  # group
+ddsFull <- ddsFull[rowSums(counts(ddsFull)) > 10, ]
+ddsFull$genotype <- factor(ddsFull$genotype, levels = c("WT","Stat3null"))
+ddsFull$stage <- factor(ddsFull$stage, levels = c("E5.5","E6.5", "E7.5")) 
+
+# Normalisation
+ddsFull <- estimateSizeFactors(ddsFull)
+normalized_counts <- counts(ddsFull, normalized=TRUE)
+```
+
+```{r}
+# DEseq per stage
+DEgenes = lapply(unique(colData$stage), function(x){ # only on first one as test
+  meta = colData[colData$stage == x,]
+  counts.mtx = countData[, rownames(meta)]
+# remove non-expressed genes to get higher p values
+  counts.mtx = counts.mtx[rowSums(counts.mtx) > 10, ]
+  dds = DESeqDataSetFromMatrix(countData = counts.mtx, colData = meta, design = ~ genotype)  # group
+  dds$genotype <- factor(dds$genotype, levels = c("WT","Stat3null"))
+
+  deseq = DESeq(dds)
+  res = results(deseq, contrast = c('genotype', "Stat3null", "WT")) %>% 
+                as.data.table(., keep.rownames=T) %>% 
+                setnames('rn', 'gene') %>%
+                .[, sig:=padj <= padj_thr & abs(log2FoldChange) >= LFC_thr & !is.na(padj)] %>%
+                .[, stage:=x]
+  return(res)
+})    
+```
+
+```{r}
+marker_type = data.table('naive' = c('Pou5f1',
+'Sox2',
+'Nanog',
+'Zfp42',
+'Dppa3',
+'Esrrb',
+'Tfcp2l1',
+'Klf2',
+'Klf4',
+'Klf5',
+'Fgf4'),
+                         'primed' = c('Pou3f1',
+'Otx2',
+'Fgf5',
+'Nodal',
+'L1td1',
+'Etv5',
+'Utf1'),
+                         'neuroectoderm' = c('Sox1',
+'Pax6',
+'Hoxb2',
+'Hoxa1',
+'Igf2',
+'Sox21',
+'Ncam1'),
+                         'Primitive streak' = c('T',
+'Mixl1',
+'Wnt3',
+'Wnt3a',
+'Wnt5a',
+'Wnt8a',
+'Fzd10',
+'Tagf1',
+'Hoxb1',
+'Lefty2',
+'Tbx6',
+'Foxh1',
+'Egf8',
+'Zic2')) %>% 
+        melt(variable.name = "celltype", value.name = "gene", measure.vars=colnames(.)) %>% unique(by=c('celltype', 'gene'))
+```
+
+```{r}
+to.plot = rbindlist(DEgenes)
+labels = to.plot[sig==TRUE,] %>% .[order(-abs(log2FoldChange)),] %>% .[,head(.SD, 15), by=stage]
+
+to.plot = to.plot[gene %in% marker_type$gene] %>% merge(marker_type, by='gene') %>%
+    .[,stage:=factor(stage, levels=c('E7.5', 'E6.5', 'E5.5'))] %>%
+    .[,gene:=factor(gene, levels=marker_type$gene)]
+
+options(repr.plot.width=5, repr.plot.height=20) 
+
+g <- ggplot(to.plot, aes(stage, log2FoldChange, fill=sig)) +
+    geom_bar(stat='identity') + 
+    scale_fill_manual(values = c('TRUE' = 'red', 'FALSE'='black')) +
+    facet_grid(to.plot$gene~to.plot$celltype) + 
+    #geom_hline(yintercept=0, col='black') + 
+    theme_bw() + 
+    coord_flip() + 
+    theme(legend.position= 'none',
+         #axis.text.x=element_text(angle=-45, hjust=0, vjust=1),
+         strip.background = element_rect(fill='white'),
+         strip.text.y.left = element_text(angle = 0),
+         text=element_text(size=20),
+         strip.placement = "outside")
+
+pdf("log2FCplot.pdf", width = 6, height = 25)
+g
+dev.off()
+```
+
+#naive genes
+```{r}
+naive = data.table('naive' = c('Pou5f1',
+'Sox2',
+'Nanog',
+'Zfp42',
+'Dppa3',
+'Esrrb',
+'Tfcp2l1',
+'Klf2',
+'Klf4',
+'Klf5',
+'Fgf4')) %>% 
+        melt(variable.name = "celltype", value.name = "gene", measure.vars=colnames(.)) %>% unique(by=c('celltype', 'gene'))
+```
+
+#plot for naive genes
+```{r}
+to.plot = rbindlist(DEgenes)
+labels = to.plot[sig==TRUE,] %>% .[order(-abs(log2FoldChange)),] %>% .[,head(.SD, 15), by=stage]
+
+to.plot = to.plot[gene %in% naive$gene] %>% merge(naive, by='gene') %>%
+    .[,stage:=factor(stage, levels=c('E7.5', 'E6.5', 'E5.5'))] %>%
+    .[,gene:=factor(gene, levels=naive$gene)]
+
+options(repr.plot.width=3, repr.plot.height=10) 
+
+gn <- ggplot(to.plot, aes(stage, log2FoldChange, fill=sig)) +
+    geom_bar(stat='identity', width = 0.75) + 
+    scale_fill_manual(values = c('TRUE' = 'red', 'FALSE'='black')) +
+    facet_grid(to.plot$gene) + 
+    #geom_hline(yintercept=0, col='black') + 
+    theme_bw() + 
+    coord_flip() + 
+    theme(legend.position= 'none',
+         #axis.text.x=element_text(angle=-45, hjust=0, vjust=1),
+         strip.background = element_rect(fill='white'),
+         strip.text.y.left = element_text(angle = 0),
+         text=element_text(size=20),
+         strip.placement = "outside",
+         strip.text=element_text(margin=margin()),
+          panel.spacing=unit(0.5, "lines"))
+
+pdf("log2FCplot_naive.pdf", width = 5, height = 10)
+gn
+dev.off()
+gn
+```
+#primed gens
+```{r}
+primed = data.table('primed' = c('Pou3f1',
+'Otx2',
+'Fgf5',
+'Nodal',
+'L1td1',
+'Etv5',
+'Utf1')) %>% 
+        melt(variable.name = "celltype", value.name = "gene", measure.vars=colnames(.)) %>% unique(by=c('celltype', 'gene'))
+```
+
+
+#plot for primed genes
+```{r}
+to.plot = rbindlist(DEgenes)
+labels = to.plot[sig==TRUE,] %>% .[order(-abs(log2FoldChange)),] %>% .[,head(.SD, 15), by=stage]
+
+to.plot = to.plot[gene %in% primed$gene] %>% merge(primed, by='gene') %>%
+    .[,stage:=factor(stage, levels=c('E7.5', 'E6.5', 'E5.5'))] %>%
+    .[,gene:=factor(gene, levels=primed$gene)]
+
+#options(repr.plot.width=5, repr.plot.height=20) 
+
+gprd <- ggplot(to.plot, aes(stage, log2FoldChange, fill=sig)) +
+    geom_bar(stat='identity', width = 0.75) + 
+    scale_fill_manual(values = c('TRUE' = 'red', 'FALSE'='black')) +
+    facet_grid(to.plot$gene) + 
+    #geom_hline(yintercept=0, col='black') + 
+    theme_bw() + 
+    coord_fixed(ratio = 5) +
+    coord_flip() + 
+    theme(legend.position= 'none',
+         #axis.text.x=element_text(angle=-45, hjust=0, vjust=1),
+         strip.background = element_rect(fill='white'),
+         strip.text.y.left = element_text(angle = 0),
+         text=element_text(size=20),
+         strip.placement = "outside",
+         strip.text=element_text(margin=margin()),
+          panel.spacing=unit(0.5, "lines"))
+
+ggsave("log2FCplot_primed.pdf", gprd, width = 5, height = 7)
+gprd
+
+```
+
+#neuroectoderm genes
+```{r}
+neuro = data.table('neuroectoderm' = c('Sox1',
+'Pax6',
+'Hoxb2',
+'Hoxa1',
+'Igf2',
+'Sox21',
+'Ncam1')) %>% 
+        melt(variable.name = "celltype", value.name = "gene", measure.vars=colnames(.)) %>% unique(by=c('celltype', 'gene'))
+```
+
+#plot for neuroectoderm genes
+```{r}
+to.plot = rbindlist(DEgenes)
+labels = to.plot[sig==TRUE,] %>% .[order(-abs(log2FoldChange)),] %>% .[,head(.SD, 15), by=stage]
+
+to.plot = to.plot[gene %in% neuro$gene] %>% merge(neuro, by='gene') %>%
+    .[,stage:=factor(stage, levels=c('E7.5', 'E6.5', 'E5.5'))] %>%
+    .[,gene:=factor(gene, levels=neuro$gene)]
+
+#options(repr.plot.width=5, repr.plot.height=20) 
+
+gneuro <- ggplot(to.plot, aes(stage, log2FoldChange, fill=sig)) +
+    geom_bar(stat='identity', width = 0.75) + 
+    scale_fill_manual(values = c('TRUE' = 'red', 'FALSE'='black')) +
+    facet_grid(to.plot$gene) + 
+    #geom_hline(yintercept=0, col='black') + 
+    theme_bw() + 
+    coord_fixed(ratio = 5) +
+    coord_flip() + 
+    theme(legend.position= 'none',
+         #axis.text.x=element_text(angle=-45, hjust=0, vjust=1),
+         strip.background = element_rect(fill='white'),
+         strip.text.y.left = element_text(angle = 0),
+         text=element_text(size=20),
+         strip.placement = "outside",
+         strip.text=element_text(margin=margin()),
+          panel.spacing=unit(0.5, "lines"))
+
+ggsave("log2FCplot_neuroectoderm.pdf", gneuro, width = 5, height = 7)
+gneuro
+```
+
+#Primitive streak genes
+```{r}
+streak = data.table('Primitive streak' = c('T',
+'Mixl1',
+'Wnt3',
+'Wnt3a',
+'Wnt5a',
+'Wnt8a',
+'Fzd10',
+'Tagf1',
+'Hoxb1',
+'Lefty2',
+'Tbx6',
+'Foxh1',
+'Egf8',
+'Zic2')) %>% 
+        melt(variable.name = "celltype", value.name = "gene", measure.vars=colnames(.)) %>% unique(by=c('celltype', 'gene'))
+```
+
+#plot for primitive streak
+```{r}
+to.plot = rbindlist(DEgenes)
+labels = to.plot[sig==TRUE,] %>% .[order(-abs(log2FoldChange)),] %>% .[,head(.SD, 15), by=stage]
+
+to.plot = to.plot[gene %in% streak$gene] %>% merge(streak, by='gene') %>%
+    .[,stage:=factor(stage, levels=c('E7.5', 'E6.5', 'E5.5'))] %>%
+    .[,gene:=factor(gene, levels=streak$gene)]
+
+#options(repr.plot.width=5, repr.plot.height=20) 
+
+gpstreak <- ggplot(to.plot, aes(stage, log2FoldChange, fill=sig)) +
+    geom_bar(stat='identity', width = 0.75) + 
+    scale_fill_manual(values = c('TRUE' = 'red', 'FALSE'='black')) +
+    facet_grid(to.plot$gene) + 
+    #geom_hline(yintercept=0, col='black') + 
+    theme_bw() + 
+    coord_fixed(ratio = 5) +
+    coord_flip() + 
+    theme(legend.position= 'none',
+         #axis.text.x=element_text(angle=-45, hjust=0, vjust=1),
+         strip.background = element_rect(fill='white'),
+         strip.text.y.left = element_text(angle = 0),
+         text=element_text(size=20),
+         strip.placement = "outside",
+         strip.text=element_text(margin=margin()),
+          panel.spacing=unit(0.5, "lines"))
+
+ggsave("log2FCplot_primitivestreak.pdf", gpstreak, width = 5, height = 10.5)
+gpstreak
+```
